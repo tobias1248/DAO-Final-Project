@@ -38,17 +38,43 @@ const formatProposalId = (value) => {
   return str.length > 14 ? `${str.slice(0, 8)}…${str.slice(-4)}` : str;
 };
 
+const toNumber = (value) => {
+  if (value === undefined || value === null) return undefined;
+  const raw =
+    typeof value === "object" && value?.toString ? value.toString() : value;
+  const num = Number(raw);
+  return Number.isFinite(num) ? num : undefined;
+};
+
+const normalizeState = (state) => {
+  if (state === undefined || state === null) return "unknown";
+  const str = state.toString().toLowerCase();
+  if (str === "1" || str === "active") return "active";
+  if (str === "0" || str === "pending") return "pending";
+  return str;
+};
+
+// Governor/Vote 合約中 state = 1 代表 Active；若合約未回傳 state，預設視為可能有效以避免漏顯示
+const isProposalActive = (proposal, externalState) => {
+  const stateValue = externalState ?? proposal?.state ?? proposal?.status;
+  const normalized = normalizeState(stateValue);
+  if (normalized === "unknown") return true;
+  return normalized === "active";
+};
+
 export default function App() {
   const [hasVoted, setHasVoted] = useState(false);
   const [txNotice, setTxNotice] = useState({ type: "idle", message: "" });
   const [selectedProposalId, setSelectedProposalId] = useState(PROPOSAL_ID);
   const [hasDelegated, setHasDelegated] = useState(false);
+  const [proposalStates, setProposalStates] = useState({});
   const address = useAddress();
   const { contract } = useContract(VOTE_CONTRACT_ADDRESS);
   const {
     data: proposals,
     isLoading: isLoadingProposals,
     error: proposalsError,
+    refetch: refetchProposals,
   } = useContractRead(contract, "getAllProposals", []);
   const {
     data: voteCounts,
@@ -82,20 +108,40 @@ export default function App() {
     "balanceOf",
     [address || ZERO_ADDRESS],
   );
+  const { data: delegatee, isLoading: isLoadingDelegate } = useContractRead(
+    tokenContract,
+    "delegates",
+    [address || ZERO_ADDRESS],
+  );
 
   useEffect(() => {
-    if (proposals?.length) {
-      const sorted = [...proposals].sort(
-        (a, b) => Number(b.proposalId) - Number(a.proposalId),
+    if (!refetchProposals) return undefined;
+    const interval = setInterval(() => {
+      refetchProposals();
+    }, 15000);
+    return () => clearInterval(interval);
+  }, [refetchProposals]);
+
+  useEffect(() => {
+    if (!proposals?.length) return;
+    const sortedActive = proposals
+      .filter((proposal) =>
+        isProposalActive(
+          proposal,
+          proposalStates[proposal?.proposalId?.toString?.() || ""],
+        ),
+      )
+      .sort(
+        (a, b) =>
+          (toNumber(b?.proposalId) || 0) - (toNumber(a?.proposalId) || 0),
       );
-      const latestId = sorted[0]?.proposalId?.toString();
-      if (latestId && latestId !== selectedProposalId) {
-        setSelectedProposalId(latestId);
-        setHasVoted(false);
-        setTxNotice({ type: "idle", message: "" });
-      }
+    const latestId = sortedActive[0]?.proposalId?.toString();
+    if (latestId && latestId !== selectedProposalId) {
+      setSelectedProposalId(latestId);
+      setHasVoted(false);
+      setTxNotice({ type: "idle", message: "" });
     }
-  }, [proposals, selectedProposalId]);
+  }, [proposals, proposalStates, selectedProposalId]);
 
   const yesValue = parseVotes(voteCounts?.forVotes);
   const noValue = parseVotes(voteCounts?.againstVotes);
@@ -104,14 +150,66 @@ export default function App() {
   useEffect(() => {
     if (parseVotes(votingPower) > 0) {
       setHasDelegated(true);
+    } else {
+      const delegatedTo =
+        delegatee?.toString && delegatee.toString().toLowerCase();
+      const hasDelegate =
+        delegatedTo && delegatedTo !== ZERO_ADDRESS.toLowerCase();
+      setHasDelegated(Boolean(hasDelegate));
     }
-  }, [votingPower]);
+  }, [votingPower, delegatee, address]);
 
+  useEffect(() => {
+    if (!contract || !proposals?.length) return undefined;
+    let cancelled = false;
+    const fetchStates = async () => {
+      try {
+        const entries = await Promise.all(
+          proposals.map(async (p) => {
+            const idStr = p?.proposalId?.toString?.();
+            if (!idStr) return null;
+            try {
+              const stateValue = await contract.call("state", [p.proposalId]);
+              return [idStr, stateValue];
+            } catch (err) {
+              return [idStr, p?.state ?? p?.status ?? "unknown"];
+            }
+          }),
+        );
+        if (cancelled) return;
+        const next = entries.reduce((acc, item) => {
+          if (!item) return acc;
+          const [id, stateValue] = item;
+          acc[id] = stateValue;
+          return acc;
+        }, {});
+        setProposalStates(next);
+      } catch (err) {
+        // 不影響主流程，僅記錄錯誤
+        console.error("Failed to fetch proposal states", err);
+      }
+    };
+    fetchStates();
+    const interval = setInterval(fetchStates, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [contract, proposals]);
+
+  const activeProposals =
+    proposals?.filter((proposal) =>
+      isProposalActive(
+        proposal,
+        proposalStates[proposal?.proposalId?.toString?.() || ""],
+      ),
+    ) || [];
   const currentProposal =
-    proposals?.find(
+    activeProposals.find(
       (item) =>
         item?.proposalId?.toString() === selectedProposalId?.toString(),
-    ) || proposals?.[0];
+    ) || activeProposals[0];
+  const hasActiveProposal = Boolean(currentProposal);
 
   const stats = [
     { key: "yes", label: "贊成 Yes", value: yesValue },
@@ -141,14 +239,16 @@ export default function App() {
   };
 
   const proposalTitle =
-    proposalMeta?.description ||
-    currentProposal?.description ||
-    "尚無提案，請先建立提案";
-  const displayProposalId = formatProposalId(selectedProposalId);
-  const readyToVote = Boolean(currentProposal && selectedProposalId);
+    (hasActiveProposal &&
+      (proposalMeta?.description || currentProposal?.description)) ||
+    "目前尚無提案";
+  const displayProposalId = hasActiveProposal
+    ? formatProposalId(selectedProposalId)
+    : "—";
+  const readyToVote = Boolean(hasActiveProposal && selectedProposalId);
   const isVotingDisabled = !readyToVote || hasVoted;
-  const hasVotingPower =
-    votingPower && Number(parseVotes(votingPower)) > 0 && address;
+  const votingPowerValue = parseVotes(votingPower);
+  const hasVotingPower = votingPower && Number(votingPowerValue) > 0 && address;
   const hasTokens =
     tokenBalance && Number(parseVotes(tokenBalance)) > 0 && address;
 
@@ -229,63 +329,77 @@ export default function App() {
             {address &&
               !isLoadingVotingPower &&
               hasTokens &&
+              !isLoadingDelegate &&
+              !hasDelegated &&
               !hasVotingPower && (
               <div className="status-banner warning">
                 您尚未擁有投票權，請先 delegate。
               </div>
             )}
-            <p className="lede">
-              體驗 web3 投票，所有票數直接寫入區塊鏈。選擇立場並在錢包中確認
-              transaction，您的選擇將即時同步。
-            </p>
+            {hasActiveProposal ? (
+              <>
+                <p className="lede">
+                  體驗 web3 投票，所有票數直接寫入區塊鏈。選擇立場並在錢包中確認
+                  transaction，您的選擇將即時同步。
+                </p>
 
-            <div className="vote-actions">
-              <Web3Button
-                contractAddress={VOTE_CONTRACT_ADDRESS}
-                action={(contract) => {
-                  if (!readyToVote) throw new Error("尚未載入提案");
-                  return contract.call("castVote", [selectedProposalId, 1]);
-                }}
-                onSuccess={() => handleVoteSuccess("贊成")}
-                onError={handleVoteError}
-                className="vote-btn yes"
-                isDisabled={isVotingDisabled}
-              >
-                贊成 Yes
-              </Web3Button>
+                <div className="vote-actions">
+                  <Web3Button
+                    contractAddress={VOTE_CONTRACT_ADDRESS}
+                    action={(contract) => {
+                      if (!readyToVote) throw new Error("尚未載入提案");
+                      return contract.call("castVote", [selectedProposalId, 1]);
+                    }}
+                    onSuccess={() => handleVoteSuccess("贊成")}
+                    onError={handleVoteError}
+                    className="vote-btn yes"
+                    isDisabled={isVotingDisabled}
+                  >
+                    贊成 Yes
+                  </Web3Button>
 
-              <Web3Button
-                contractAddress={VOTE_CONTRACT_ADDRESS}
-                action={(contract) => {
-                  if (!readyToVote) throw new Error("尚未載入提案");
-                  return contract.call("castVote", [selectedProposalId, 0]);
-                }}
-                onSuccess={() => handleVoteSuccess("反對")}
-                onError={handleVoteError}
-                className="vote-btn no"
-                isDisabled={isVotingDisabled}
-              >
-                反對 No
-              </Web3Button>
+                  <Web3Button
+                    contractAddress={VOTE_CONTRACT_ADDRESS}
+                    action={(contract) => {
+                      if (!readyToVote) throw new Error("尚未載入提案");
+                      return contract.call("castVote", [selectedProposalId, 0]);
+                    }}
+                    onSuccess={() => handleVoteSuccess("反對")}
+                    onError={handleVoteError}
+                    className="vote-btn no"
+                    isDisabled={isVotingDisabled}
+                  >
+                    反對 No
+                  </Web3Button>
 
-              <Web3Button
-                contractAddress={VOTE_CONTRACT_ADDRESS}
-                action={(contract) => {
-                  if (!readyToVote) throw new Error("尚未載入提案");
-                  return contract.call("castVote", [selectedProposalId, 2]);
-                }}
-                onSuccess={() => handleVoteSuccess("棄權")}
-                onError={handleVoteError}
-                className="vote-btn neutral"
-                isDisabled={isVotingDisabled}
-              >
-                棄權 Abstain
-              </Web3Button>
-            </div>
+                  <Web3Button
+                    contractAddress={VOTE_CONTRACT_ADDRESS}
+                    action={(contract) => {
+                      if (!readyToVote) throw new Error("尚未載入提案");
+                      return contract.call("castVote", [selectedProposalId, 2]);
+                    }}
+                    onSuccess={() => handleVoteSuccess("棄權")}
+                    onError={handleVoteError}
+                    className="vote-btn neutral"
+                    isDisabled={isVotingDisabled}
+                  >
+                    棄權 Abstain
+                  </Web3Button>
+                </div>
 
-            <p className="hint">
-              送出後請在錢包確認交易；鏈上確認可能需要幾秒鐘，請勿重複點擊。
-            </p>
+                <p className="hint">
+                  送出後請在錢包確認交易；鏈上確認可能需要幾秒鐘，請勿重複點擊。
+                </p>
+              </>
+            ) : (
+              <div className="empty-proposal">
+                <div className="chip ghost">待提案</div>
+                <p className="empty-title">目前尚無提案</p>
+                <p className="empty-body">
+                  前端未偵測到 Active 狀態的提案。治理團隊提交新提案後，內容會自動出現在這裡。
+                </p>
+              </div>
+            )}
           </section>
 
           <section className="panel stats-card">
@@ -303,11 +417,11 @@ export default function App() {
               </div>
             ) : isLoadingProposals ? (
               <div className="skeleton">正在載入提案...</div>
-            ) : !proposals?.length ? (
+            ) : !activeProposals?.length ? (
               <div className="locked">
-                <p className="locked-title">尚未有提案</p>
+                <p className="locked-title">目前尚無提案</p>
                 <p className="locked-body">
-                  請先在合約上建立提案；或確認您填入的合約地址正確。
+                  尚未有 Active 提案，等待治理團隊提交後即可在此觀看票數。
                 </p>
               </div>
             ) : !hasVoted ? (
