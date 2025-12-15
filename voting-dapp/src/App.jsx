@@ -8,19 +8,16 @@ import {
 import { useEffect, useState } from "react";
 import "./App.css";
 
-// ================= 🛠️ 設定區 (請修改這裡) =================
-// 1. 您的 Vote 合約地址 (不是 Token 地址喔！)
 const VOTE_CONTRACT_ADDRESS = "0x015b294F6C66D480f7B57085526e73Ed888295dD";
-
-// 2. 提案 ID (第一題通常是 0)
 const PROPOSAL_ID = "0";
-// ========================================================
 const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
 
+// 用於格式化數字顯示的工具
 const numberFormatter = new Intl.NumberFormat("zh-TW", {
   maximumFractionDigits: 2,
 });
 
+// Solidity 中的 uint256 數值通常以 1e18 為單位進行表示，以下函式將其轉換為較易讀的數字格式
 const parseVotes = (value) => {
   if (!value) return 0;
   const asString =
@@ -29,15 +26,18 @@ const parseVotes = (value) => {
   return Number.isFinite(asNumber) ? asNumber / 1e18 : 0;
 };
 
+// 將地址縮短顯示，例如 0x123456...abcd
 const shorten = (value) =>
   value ? `${value.slice(0, 6)}...${value.slice(-4)}` : "";
 
+// 將提案 ID 縮短顯示，過長時中間以省略號取代
 const formatProposalId = (value) => {
   if (!value) return "—";
   const str = value.toString();
   return str.length > 14 ? `${str.slice(0, 8)}…${str.slice(-4)}` : str;
 };
 
+// 將輸入值轉換為數字，無法轉換時回傳 undefined
 const toNumber = (value) => {
   if (value === undefined || value === null) return undefined;
   const raw =
@@ -46,6 +46,7 @@ const toNumber = (value) => {
   return Number.isFinite(num) ? num : undefined;
 };
 
+// 正規化提案狀態的表示方式
 const normalizeState = (state) => {
   if (state === undefined || state === null) return "unknown";
   const str = state.toString().toLowerCase();
