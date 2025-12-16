@@ -35,3 +35,6 @@ npm run preview   # optional preview of the build output
 - Sepolia is the default chain; change `activeChain` in code if needed.
 - If the wallet lacks governance tokens or delegation, the UI will prompt to acquire tokens and delegate before voting.
 - Do not hardcode Client ID/contract addresses; keep them in `.env` and ensure `.gitignore` excludes it.
+
+## Vote
+<https://dao-final-project.onrender.com/>
