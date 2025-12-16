@@ -115,16 +115,21 @@ export default function App() {
     [address || ZERO_ADDRESS],
   );
 
+  // 每 15 秒重新抓取提案列表，避免漏掉新建立的提案
   useEffect(() => {
     if (!refetchProposals) return undefined;
+    // 啟動輪詢
     const interval = setInterval(() => {
       refetchProposals();
     }, 15000);
+    // 離開元件時停止輪詢
     return () => clearInterval(interval);
   }, [refetchProposals]);
 
+  // 取得所有提案後，自動鎖定最新的 Active 提案並重置投票狀態
   useEffect(() => {
     if (!proposals?.length) return;
+    // 篩出 Active 並由大到小排序 ID
     const sortedActive = proposals
       .filter((proposal) =>
         isProposalActive(
@@ -136,6 +141,7 @@ export default function App() {
         (a, b) =>
           (toNumber(b?.proposalId) || 0) - (toNumber(a?.proposalId) || 0),
       );
+    // 取最新 ID，若不同則更新選取並重置提示/投票狀態
     const latestId = sortedActive[0]?.proposalId?.toString();
     if (latestId && latestId !== selectedProposalId) {
       setSelectedProposalId(latestId);
@@ -148,23 +154,28 @@ export default function App() {
   const noValue = parseVotes(voteCounts?.againstVotes);
   const abstainValue = parseVotes(voteCounts?.abstainVotes);
 
+  // 檢查當前地址是否已具備投票權（有權重或已委託）
   useEffect(() => {
     if (parseVotes(votingPower) > 0) {
+      // 有票重即視為已委託
       setHasDelegated(true);
     } else {
       const delegatedTo =
         delegatee?.toString && delegatee.toString().toLowerCase();
       const hasDelegate =
         delegatedTo && delegatedTo !== ZERO_ADDRESS.toLowerCase();
+      // 沒票重時，判斷是否至少委託過非零地址
       setHasDelegated(Boolean(hasDelegate));
     }
   }, [votingPower, delegatee, address]);
 
+  // 定期向鏈上呼叫 state(proposalId)，同步每個提案的最新狀態
   useEffect(() => {
     if (!contract || !proposals?.length) return undefined;
     let cancelled = false;
     const fetchStates = async () => {
       try {
+        // 逐一查詢每個提案的 state 值
         const entries = await Promise.all(
           proposals.map(async (p) => {
             const idStr = p?.proposalId?.toString?.();
@@ -173,11 +184,13 @@ export default function App() {
               const stateValue = await contract.call("state", [p.proposalId]);
               return [idStr, stateValue];
             } catch (err) {
+              // 呼叫失敗時回退用原資料的 state/status
               return [idStr, p?.state ?? p?.status ?? "unknown"];
             }
           }),
         );
         if (cancelled) return;
+        // 整理成 {proposalId: state} 形式後寫入
         const next = entries.reduce((acc, item) => {
           if (!item) return acc;
           const [id, stateValue] = item;
@@ -191,6 +204,7 @@ export default function App() {
       }
     };
     fetchStates();
+    // 每 15 秒更新一次提案狀態
     const interval = setInterval(fetchStates, 15000);
     return () => {
       cancelled = true;
